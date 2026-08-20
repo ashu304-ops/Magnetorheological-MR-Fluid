@@ -1,180 +1,375 @@
-#include <iostream>
-#include <thread>
-#include <chrono>
-#include <atomic>
-#include <cmath>
 
+extern "C" {
+#include "FreeRTOS.h"
+#include "task.h"
+}
+
+#include <memory>
+#include <string>
+
+#include "SuspensionController.hpp"
 #include "SensorReader.hpp"
 #include "CoilDriver.hpp"
 #include "TelemetryLogger.hpp"
-#include "SuspensionController.hpp"
-#include "LockFreeRingBuffer.hpp"
-#include "TelemetryFrame.hpp"
+#include "TelemetryFormatter.hpp"
+#include "ComfortStrategy.hpp"
 
-std::atomic<bool> systemRunning{true};
 
-LockFreeRingBuffer<TelemetryFrame, 256> telemetryQueue;
+/* ============================================================
+ * Hardware functions
+ * ============================================================ */
 
-// THREAD 1: Real-Time Control Loop
-void controlLoopTask(
-    SuspensionController& controller,
-    SensorReader& sensor,
-    CoilDriver& coil)
+extern "C" void hw_init(void);
+extern "C" void hw_gpio_init(void);
+extern "C" void hw_uart_puts(const char* str);
+
+
+/* ============================================================
+ * Global objects
+ * ============================================================ */
+
+static SuspensionController* g_controller = nullptr;
+static TelemetryLogger* g_logger = nullptr;
+static SensorReader* g_sensor = nullptr;
+
+
+/* ============================================================
+ * CONTROL TASK
+ *
+ * 100 Hz
+ *
+ * Period = 10 ms
+ *
+ * Responsibilities:
+ *
+ * Sensor
+ *   ↓
+ * Filter
+ *   ↓
+ * Strategy
+ *   ↓
+ * Coil
+ *   ↓
+ * Logger
+ * ============================================================ */
+
+static void control_task(void* argument)
 {
-    using namespace std::chrono_literals;
+    (void)argument;
 
-    float tick = 0.0f;
+    hw_uart_puts(
+        "[TASK] CONTROL task started\r\n"
+    );
 
-    while (systemRunning.load(std::memory_order_relaxed)) {
+    uint32_t counter = 0U;
 
-        auto nextCycle =
-            std::chrono::steady_clock::now() + 10ms;
+    for (;;)
+    {
+        if (g_controller != nullptr)
+        {
+            g_controller->runCycle(25.0f);
+        }
 
-        // Simulated acceleration:
-        // approximately 0.5g -> 2.5g
-        float currentSimulatedG =
-            1.5f + 1.0f * std::sin(tick);
+        counter++;
 
-        tick += 0.05f;
+        if ((counter % 100U) == 0U)
+        {
+            hw_uart_puts(
+                "[TASK] CONTROL: 100 cycles completed\r\n"
+            );
+        }
 
-        // Simulated hardware input
-        sensor.injectHardwareReading(currentSimulatedG);
-
-        // Run real suspension control algorithm
-        controller.runCycle(25.0f);
-
-        // Build telemetry from REAL controller state
-        TelemetryFrame frame{
-            controller.lastAccelerationG(),
-            controller.lastForceN(),
-            controller.lastRequestedCurrentA(),
-            coil.current(),
-            controller.lastTemperatureC(),
-            controller.lastSensorError(),
-            controller.lastCoilError(),
-            controller.isSafeMode()
-        };
-
-        // Non-blocking telemetry queue
-        telemetryQueue.push(frame);
-
-        std::this_thread::sleep_until(nextCycle);
+        /*
+         * 100 Hz control loop.
+         */
+        vTaskDelay(
+            pdMS_TO_TICKS(10)
+        );
     }
 }
 
 
-// THREAD 2: Telemetry Worker
-void telemetryLoggingTask(TelemetryLogger& logger)
+/* ============================================================
+ * TELEMETRY TASK
+ *
+ * Runs every 1 second.
+ *
+ * Reads the latest telemetry record from the logger
+ * and sends it through UART.
+ * ============================================================ */
+
+static void telemetry_task(void* argument)
 {
-    using namespace std::chrono_literals;
+    (void)argument;
 
-    size_t frameCounter = 0;
+    hw_uart_puts(
+        "[TASK] TELEMETRY task started\r\n"
+    );
 
-    while (systemRunning.load(std::memory_order_relaxed)) {
+    for (;;)
+    {
+        if (g_logger != nullptr)
+        {
+            TelemetryRecord record =
+                g_logger->getLatest();
 
-        while (auto frame = telemetryQueue.pop()) {
+            std::string message =
+                TelemetryFormatter::format(record);
 
-            frameCounter++;
-
-            if (frame->isSafeMode) {
-                logger.recordSensorError(
-                    frame->sensorError);
-            }
-
-            // Display at 10 Hz
-            if (frameCounter % 10 == 0) {
-
-                std::cout
-                    << "\r"
-                    << "[TELEMETRY 10Hz] "
-                    << "Accel: "
-                    << frame->accelerationG
-                    << " g | Force: "
-                    << frame->forceNewton
-                    << " N | Requested: "
-                    << frame->requestedCurrentAmps
-                    << " A | Applied: "
-                    << frame->appliedCurrentAmps
-                    << " A | Temp: "
-                    << frame->temperatureCelsius
-                    << " C | SafeMode: "
-                    << (frame->isSafeMode ? "YES" : "NO")
-                    << "   "
-                    << std::flush;
-            }
+            hw_uart_puts(
+                message.c_str()
+            );
         }
 
-        std::this_thread::sleep_for(5ms);
-    }
-
-    // Drain queue during shutdown
-    while (auto frame = telemetryQueue.pop()) {
-
-        if (frame->isSafeMode) {
-            logger.recordSensorError(
-                frame->sensorError);
-        }
+        /*
+         * Telemetry rate = 1 Hz.
+         */
+        vTaskDelay(
+            pdMS_TO_TICKS(1000)
+        );
     }
 }
 
 
-int main()
+/* ============================================================
+ * SENSOR FAULT TEST TASK
+ *
+ * QEMU TEST ONLY
+ *
+ * Timeline:
+ *
+ *   0 sec
+ *      Normal operation
+ *
+ *   3 sec
+ *      Inject sensor timeout
+ *
+ *   After 3 sec
+ *      Sensor continuously reports timeout
+ *      Controller enters safe mode
+ *      Coil is commanded to 0 A
+ * ============================================================ */
+
+static void sensor_fault_test_task(void* argument)
 {
-    std::cout
-        << "[SYSTEM] Initializing suspension hardware...\n";
+    (void)argument;
 
-    SensorReader sensor;
-    CoilDriver coil;
-    TelemetryLogger logger;
+    hw_uart_puts(
+        "[TASK] SENSOR TEST task started\r\n"
+    );
 
-    SuspensionController controller(
+    /*
+     * Allow the system to run normally for 3 seconds.
+     */
+    vTaskDelay(
+        pdMS_TO_TICKS(3000)
+    );
+
+    if (g_sensor != nullptr)
+    {
+        hw_uart_puts(
+            "[TEST] Injecting SENSOR TIMEOUT...\r\n"
+        );
+
+        g_sensor->injectTimeout(true);
+    }
+
+    /*
+     * Keep the injected fault active.
+     */
+    for (;;)
+    {
+        vTaskDelay(
+            pdMS_TO_TICKS(1000)
+        );
+    }
+}
+
+
+/* ============================================================
+ * MAIN
+ * ============================================================ */
+
+extern "C" int main(void)
+{
+    /* ========================================================
+     * Hardware initialization
+     * ======================================================== */
+
+    hw_init();
+
+    hw_gpio_init();
+
+    hw_uart_puts(
+        "[MAIN] Hardware initialized\r\n"
+    );
+
+
+    /* ========================================================
+     * Application objects
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[MAIN] Creating application objects\r\n"
+    );
+
+    static SensorReader sensor;
+    static CoilDriver coil;
+    static TelemetryLogger logger;
+
+    static SuspensionController controller(
         sensor,
         coil,
-        logger);
+        logger
+    );
 
-    std::cout
-        << "[SYSTEM] Spawning Telemetry Worker Thread...\n";
 
-    std::thread telemetryThread(
-        telemetryLoggingTask,
-        std::ref(logger));
+    /* ========================================================
+     * Select damping strategy
+     * ======================================================== */
 
-    std::cout
-        << "[SYSTEM] Spawning Control Loop Thread (100 Hz)...\n";
+    controller.setStrategy(
+        std::make_unique<ComfortStrategy>()
+    );
 
-    std::thread controlThread(
-        controlLoopTask,
-        std::ref(controller),
-        std::ref(sensor),
-        std::ref(coil));
 
-    std::cout
-        << "[SYSTEM] Running. Press ENTER to initiate clean shutdown...\n\n";
+    /* ========================================================
+     * Store global references
+     * ======================================================== */
 
-    std::cin.get();
+    g_controller = &controller;
+    g_logger = &logger;
+    g_sensor = &sensor;
 
-    std::cout
-        << "\n[SYSTEM] Shutdown signal received. "
-        << "Stopping control threads...\n";
 
-    systemRunning.store(
-        false,
-        std::memory_order_relaxed);
+    hw_uart_puts(
+        "[MAIN] Controller initialized\r\n"
+    );
 
-    if (controlThread.joinable()) {
-        controlThread.join();
-        std::cout
-            << "[SYSTEM] Control thread stopped.\n";
+
+    /* ========================================================
+     * CREATE CONTROL TASK
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[MAIN] Creating CONTROL task\r\n"
+    );
+
+    BaseType_t result = xTaskCreate(
+        control_task,
+        "CONTROL",
+        512,
+        nullptr,
+        2,
+        nullptr
+    );
+
+    if (result != pdPASS)
+    {
+        hw_uart_puts(
+            "[MAIN] ERROR: CONTROL task creation failed\r\n"
+        );
+
+        for (;;)
+        {
+            __asm volatile ("nop");
+        }
     }
 
-    if (telemetryThread.joinable()) {
-        telemetryThread.join();
-        std::cout
-            << "[SYSTEM] Telemetry thread stopped.\n";
+    hw_uart_puts(
+        "[MAIN] CONTROL task created successfully\r\n"
+    );
+
+
+    /* ========================================================
+     * CREATE TELEMETRY TASK
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[MAIN] Creating TELEMETRY task\r\n"
+    );
+
+    result = xTaskCreate(
+        telemetry_task,
+        "TELEMETRY",
+        512,
+        nullptr,
+        1,
+        nullptr
+    );
+
+    if (result != pdPASS)
+    {
+        hw_uart_puts(
+            "[MAIN] ERROR: TELEMETRY task creation failed\r\n"
+        );
+
+        for (;;)
+        {
+            __asm volatile ("nop");
+        }
     }
 
-    std::cout
-        << "[SYSTEM] Shutdown complete cleanly.\n";
+    hw_uart_puts(
+        "[MAIN] TELEMETRY task created successfully\r\n"
+    );
 
-    return 0;
+
+    /* ========================================================
+     * CREATE SENSOR TEST TASK
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[MAIN] Creating SENSOR TEST task\r\n"
+    );
+
+    result = xTaskCreate(
+        sensor_fault_test_task,
+        "SENSOR_TEST",
+        256,
+        nullptr,
+        1,
+        nullptr
+    );
+
+    if (result != pdPASS)
+    {
+        hw_uart_puts(
+            "[MAIN] ERROR: SENSOR TEST task creation failed\r\n"
+        );
+
+        for (;;)
+        {
+            __asm volatile ("nop");
+        }
+    }
+
+    hw_uart_puts(
+        "[MAIN] SENSOR TEST task created successfully\r\n"
+    );
+
+
+    /* ========================================================
+     * START FREERTOS
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[MAIN] Starting FreeRTOS scheduler...\r\n"
+    );
+
+    vTaskStartScheduler();
+
+
+    /* ========================================================
+     * Scheduler should never return
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[MAIN] ERROR: Scheduler returned!\r\n"
+    );
+
+    for (;;)
+    {
+        __asm volatile ("nop");
+    }
 }

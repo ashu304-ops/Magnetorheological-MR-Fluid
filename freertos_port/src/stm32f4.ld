@@ -17,12 +17,15 @@ SECTIONS
     .isr_vector :
     {
         . = ALIGN(4);
+
         KEEP(*(.isr_vector))
+
         . = ALIGN(4);
     } > FLASH
 
+
     /* ========================================================
-     * Program code and read-only data
+     * Program code
      * ======================================================== */
 
     .text :
@@ -34,12 +37,48 @@ SECTIONS
         *(.rodata*)
 
         . = ALIGN(4);
+
         _etext = .;
     } > FLASH
 
+
+    /* ========================================================
+     * ARM exception index
+     *
+     * Required by libgcc/newlib on ARM.
+     * ======================================================== */
+
+    .ARM.extab :
+    {
+        . = ALIGN(4);
+
+        *(.ARM.extab*)
+        *(.gnu.linkonce.armextab.*)
+
+        . = ALIGN(4);
+    } > FLASH
+
+
+    .ARM.exidx :
+    {
+        . = ALIGN(4);
+
+        __exidx_start = .;
+
+        *(.ARM.exidx*)
+        *(.gnu.linkonce.armexidx.*)
+
+        __exidx_end = .;
+
+        . = ALIGN(4);
+    } > FLASH
+
+
     /* ========================================================
      * Initialized data
-     * Stored in FLASH, copied to RAM by Reset_Handler.
+     *
+     * Stored in FLASH.
+     * Copied to RAM by Reset_Handler.
      * ======================================================== */
 
     _sidata = LOADADDR(.data);
@@ -55,10 +94,12 @@ SECTIONS
         . = ALIGN(4);
 
         _edata = .;
+
     } > RAM AT > FLASH
 
+
     /* ========================================================
-     * Zero-initialized data
+     * Zero initialized data
      * ======================================================== */
 
     .bss :
@@ -73,10 +114,12 @@ SECTIONS
         . = ALIGN(4);
 
         _ebss = .;
+
     } > RAM
 
+
     /* ========================================================
-     * End of RAM
+     * Heap / RAM end
      * ======================================================== */
 
     . = ALIGN(8);
@@ -85,6 +128,5 @@ SECTIONS
     _end = .;
     __end__ = .;
 
-    /* Don't discard these symbols/sections accidentally. */
     PROVIDE(_heap_start = .);
 }

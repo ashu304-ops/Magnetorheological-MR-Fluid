@@ -1,15 +1,20 @@
 #include "TelemetryFormatter.hpp"
 
-#include <string>
+#include <cstdio>
 
 std::string TelemetryFormatter::format(
     const TelemetryRecord& record)
 {
-    return "Acceleration: " +
-           std::to_string(record.accelerationG) +
-           " g, Force: " +
-           std::to_string(record.forceNewton) +
-           " N, Current: " +
-           std::to_string(record.coilCurrentAmps) +
-           " A";
+    char buffer[128];
+
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "[TEL] acc=%.2fg force=%.2fN current=%.3fA\r\n",
+        record.accelerationG,
+        record.forceNewton,
+        record.coilCurrentAmps
+    );
+
+    return std::string(buffer);
 }

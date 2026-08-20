@@ -6,5 +6,7 @@
 class TelemetryFormatter
 {
 public:
-    static std::string format(const TelemetryRecord& record);
+
+    static std::string format(
+        const TelemetryRecord& record);
 };
