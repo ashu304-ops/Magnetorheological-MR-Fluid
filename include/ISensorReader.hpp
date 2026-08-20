@@ -2,8 +2,13 @@
 
 #include "ErrorTypes.hpp"
 
-class ISensorReader {
+
+class ISensorReader
+{
 public:
+
     virtual ~ISensorReader() = default;
+
+
     virtual SensorReadResult read() noexcept = 0;
 };

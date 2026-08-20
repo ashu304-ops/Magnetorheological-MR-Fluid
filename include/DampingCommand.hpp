@@ -1,7 +1,9 @@
-// include/DampingCommand.hpp
 #pragma once
 
-struct DampingCommand {
+
+struct DampingCommand
+{
     float forceNewton{0.0f};
+
     float coilCurrentAmps{0.0f};
 };

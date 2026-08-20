@@ -1,61 +1,92 @@
 #pragma once
 
-#include <vector>
-#include <numeric>
-#include <algorithm>
+#include <array>
 #include <cstddef>
+#include <algorithm>
 #include <cmath>
 
-class SignalFilter {
-public:
-    explicit SignalFilter(size_t windowSize = 5)
-        : windowSize_(windowSize) {
-        history_.reserve(windowSize);
-    }
+template <std::size_t Capacity>
+class SignalFilter
+{
+    static_assert(Capacity > 0U, "SignalFilter capacity must be greater than zero");
 
-    float filter(float rawValue) {
-        if (history_.size() >= windowSize_) {
-            history_.erase(history_.begin());
+public:
+
+    constexpr SignalFilter() noexcept = default;
+
+    float filter(float rawValue) noexcept
+    {
+        history_[head_] = rawValue;
+
+        head_ = (head_ + 1U) % Capacity;
+
+        if (count_ < Capacity)
+        {
+            ++count_;
         }
 
-        history_.push_back(rawValue);
+        float sum = 0.0f;
 
-        float sum =
-            std::accumulate(
-                history_.begin(),
-                history_.end(),
-                0.0f
-            );
+        for (std::size_t i = 0U; i < count_; ++i)
+        {
+            sum += history_[i];
+        }
 
-        float avg =
-            sum / static_cast<float>(history_.size());
+        const float average =
+            sum / static_cast<float>(count_);
 
-        return std::clamp(avg, -5.0f, 5.0f);
+        return std::clamp(
+            average,
+            -5.0f,
+            5.0f
+        );
     }
 
-    float getPeak() const {
-        if (history_.empty()) {
+    float getPeak() const noexcept
+    {
+        if (count_ == 0U)
+        {
             return 0.0f;
         }
 
-        auto maxIt =
-            std::max_element(
-                history_.begin(),
-                history_.end(),
-                [](float a, float b) {
-                    return std::abs(a) < std::abs(b);
-                }
-            );
+        float peak = history_[0];
 
-        return *maxIt;
+        for (std::size_t i = 1U; i < count_; ++i)
+        {
+            if (std::abs(history_[i]) >
+                std::abs(peak))
+            {
+                peak = history_[i];
+            }
+        }
+
+        return peak;
     }
 
-    // Clear old sensor samples after a fault.
-    void reset() noexcept {
-        history_.clear();
+    void reset() noexcept
+    {
+        history_.fill(0.0f);
+        head_ = 0U;
+        count_ = 0U;
+    }
+
+    [[nodiscard]]
+    constexpr std::size_t size() const noexcept
+    {
+        return count_;
+    }
+
+    [[nodiscard]]
+    constexpr std::size_t capacity() const noexcept
+    {
+        return Capacity;
     }
 
 private:
-    size_t windowSize_;
-    std::vector<float> history_;
+
+    std::array<float, Capacity> history_{};
+
+    std::size_t head_{0U};
+
+    std::size_t count_{0U};
 };

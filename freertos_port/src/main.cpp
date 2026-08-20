@@ -1,4 +1,5 @@
-extern "C" {
+extern "C"
+{
 #include "FreeRTOS.h"
 #include "task.h"
 }
@@ -23,22 +24,21 @@ extern "C" void hw_uart_puts(const char* str);
 
 
 /* ============================================================
- * Global objects
+ * Global application references
  * ============================================================ */
 
 static SuspensionController* g_controller = nullptr;
 static SensorReader* g_sensor = nullptr;
+static CoilDriver* g_coil = nullptr;
 
 
 /* ============================================================
- * Embedded-friendly number formatter
- *
- * Example:
- *     0.08  -> "0.08"
- *    -4.00  -> "-4.00"
+ * FORMAT FLOAT - 2 DECIMAL PLACES
  * ============================================================ */
 
-static void format2(float value, char* buffer)
+static void format2(
+    float value,
+    char* buffer)
 {
     int32_t scaled;
 
@@ -63,8 +63,11 @@ static void format2(float value, char* buffer)
         scaled = -scaled;
     }
 
-    const int32_t integerPart = scaled / 100;
-    const int32_t decimalPart = scaled % 100;
+    const int32_t integerPart =
+        scaled / 100;
+
+    const int32_t decimalPart =
+        scaled % 100;
 
     if (integerPart >= 100)
     {
@@ -99,13 +102,12 @@ static void format2(float value, char* buffer)
 
 
 /* ============================================================
- * 3 decimal places
- *
- * Example:
- *     0.040 -> "0.040"
+ * FORMAT FLOAT - 3 DECIMAL PLACES
  * ============================================================ */
 
-static void format3(float value, char* buffer)
+static void format3(
+    float value,
+    char* buffer)
 {
     int32_t scaled;
 
@@ -130,8 +132,11 @@ static void format3(float value, char* buffer)
         scaled = -scaled;
     }
 
-    const int32_t integerPart = scaled / 1000;
-    const int32_t decimalPart = scaled % 1000;
+    const int32_t integerPart =
+        scaled / 1000;
+
+    const int32_t decimalPart =
+        scaled % 1000;
 
     if (integerPart >= 10)
     {
@@ -163,7 +168,7 @@ static void format3(float value, char* buffer)
 
 
 /* ============================================================
- * SENSOR ERROR STRING
+ * SENSOR ERROR -> STRING
  * ============================================================ */
 
 static const char* sensorErrorToString(
@@ -196,7 +201,7 @@ static const char* sensorErrorToString(
 
 
 /* ============================================================
- * COIL ERROR STRING
+ * COIL ERROR -> STRING
  * ============================================================ */
 
 static const char* coilErrorToString(
@@ -223,9 +228,7 @@ static const char* coilErrorToString(
 
 
 /* ============================================================
- * TELEMETRY OUTPUT
- *
- * Runs from TELEMETRY task only.
+ * TELEMETRY
  * ============================================================ */
 
 static void printTelemetry()
@@ -238,6 +241,7 @@ static void printTelemetry()
     char acceleration[16];
     char force[16];
     char current[16];
+    char temperature[16];
 
     format2(
         g_controller->lastAccelerationG(),
@@ -254,10 +258,11 @@ static void printTelemetry()
         current
     );
 
+    format2(
+        g_controller->lastTemperatureC(),
+        temperature
+    );
 
-    /* --------------------------------------------------------
-     * Main telemetry
-     * -------------------------------------------------------- */
 
     hw_uart_puts("[TEL] acc=");
     hw_uart_puts(acceleration);
@@ -268,11 +273,14 @@ static void printTelemetry()
     hw_uart_puts("N current=");
     hw_uart_puts(current);
 
-    hw_uart_puts("A\r\n");
+    hw_uart_puts("A temp=");
+    hw_uart_puts(temperature);
+
+    hw_uart_puts("C\r\n");
 
 
     /* --------------------------------------------------------
-     * Safe mode information
+     * SAFE MODE
      * -------------------------------------------------------- */
 
     if (g_controller->isSafeMode())
@@ -311,17 +319,12 @@ static void printTelemetry()
 /* ============================================================
  * CONTROL TASK
  *
- * Frequency:
- *     100 Hz
- *
- * Period:
- *     10 ms
- *
- * Priority:
- *     2
+ * 100 Hz
+ * 10 ms period
  * ============================================================ */
 
-static void control_task(void* argument)
+static void control_task(
+    void* argument)
 {
     (void)argument;
 
@@ -333,21 +336,12 @@ static void control_task(void* argument)
 
     for (;;)
     {
-        /* ----------------------------------------------------
-         * Execute control cycle
-         * ---------------------------------------------------- */
-
         if (g_controller != nullptr)
         {
             g_controller->runCycle(25.0f);
         }
 
-
-        /* ----------------------------------------------------
-         * Debug message once per second
-         * ---------------------------------------------------- */
-
-        counter++;
+        ++counter;
 
         if ((counter % 100U) == 0U)
         {
@@ -355,11 +349,6 @@ static void control_task(void* argument)
                 "[TASK] CONTROL: 100 cycles completed\r\n"
             );
         }
-
-
-        /* ----------------------------------------------------
-         * 100 Hz
-         * ---------------------------------------------------- */
 
         vTaskDelay(
             pdMS_TO_TICKS(10)
@@ -371,16 +360,11 @@ static void control_task(void* argument)
 /* ============================================================
  * TELEMETRY TASK
  *
- * Frequency:
- *     1 Hz
- *
- * Priority:
- *     1
- *
- * CONTROL task does not perform telemetry output.
+ * 1 Hz
  * ============================================================ */
 
-static void telemetry_task(void* argument)
+static void telemetry_task(
+    void* argument)
 {
     (void)argument;
 
@@ -400,9 +384,9 @@ static void telemetry_task(void* argument)
 
 
 /* ============================================================
- * SENSOR FAULT TEST TASK
+ * SENSOR + COIL FAULT TEST TASK
  *
- * QEMU TEST ONLY
+ * QEMU ONLY
  *
  * Timeline:
  *
@@ -410,50 +394,69 @@ static void telemetry_task(void* argument)
  *     Normal operation
  *
  * 3 sec
- *     Inject sensor timeout
+ *     Sensor timeout
  *
  * 3 - 6 sec
- *     Sensor remains failed
+ *     Safe mode
  *
  * 6 sec
  *     Sensor recovery
  *
+ * 6 - 9 sec
+ *     Normal operation
+ *
+ * 9 sec
+ *     Over-current injection
+ *
  * Expected:
  *
- * Normal
- *   ↓
- * Sensor Timeout
- *   ↓
- * Safe Mode
- *   ↓
- * Coil OFF
- *   ↓
- * Sensor Recovery
- *   ↓
- * Normal Operation
+ * NORMAL
+ *    ↓
+ * SENSOR TIMEOUT
+ *    ↓
+ * SAFE MODE
+ *    ↓
+ * COIL = 0 A
+ *    ↓
+ * SENSOR RECOVERY
+ *    ↓
+ * NORMAL
+ *    ↓
+ * OVER CURRENT
+ *    ↓
+ * SAFE MODE
  * ============================================================ */
 
-static void sensor_fault_test_task(void* argument)
+static void fault_test_task(
+    void* argument)
 {
     (void)argument;
 
     hw_uart_puts(
-        "[TASK] SENSOR TEST task started\r\n"
+        "[TASK] FAULT TEST task started\r\n"
     );
 
 
-    /* --------------------------------------------------------
-     * Allow normal operation for 3 seconds
-     * -------------------------------------------------------- */
+    /* ========================================================
+     * PHASE 1
+     *
+     * Normal operation
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[TEST] NORMAL OPERATION - 3 seconds\r\n"
+    );
 
     vTaskDelay(
         pdMS_TO_TICKS(3000)
     );
 
 
-    /* --------------------------------------------------------
-     * Inject sensor timeout
-     * -------------------------------------------------------- */
+    /* ========================================================
+     * PHASE 2
+     *
+     * Sensor timeout
+     * ======================================================== */
 
     if (g_sensor != nullptr)
     {
@@ -465,18 +468,22 @@ static void sensor_fault_test_task(void* argument)
     }
 
 
-    /* --------------------------------------------------------
-     * Keep fault active for 3 seconds
-     * -------------------------------------------------------- */
+    /* ========================================================
+     * PHASE 3
+     *
+     * Keep sensor failed for 3 seconds
+     * ======================================================== */
 
     vTaskDelay(
         pdMS_TO_TICKS(3000)
     );
 
 
-    /* --------------------------------------------------------
-     * Recover sensor
-     * -------------------------------------------------------- */
+    /* ========================================================
+     * PHASE 4
+     *
+     * Sensor recovery
+     * ======================================================== */
 
     if (g_sensor != nullptr)
     {
@@ -488,9 +495,76 @@ static void sensor_fault_test_task(void* argument)
     }
 
 
-    /* --------------------------------------------------------
-     * Test task remains alive
-     * -------------------------------------------------------- */
+    /* ========================================================
+     * Give control task time to recover
+     * ======================================================== */
+
+    vTaskDelay(
+        pdMS_TO_TICKS(3000)
+    );
+
+
+    /* ========================================================
+     * PHASE 5
+     *
+     * OVER-CURRENT TEST
+     * ======================================================== */
+
+    if (g_coil != nullptr)
+    {
+        hw_uart_puts(
+            "[TEST] Injecting OVER-CURRENT...\r\n"
+        );
+
+        const CoilResult result =
+            g_coil->injectOverCurrentTest();
+
+        if (result.error ==
+            CoilError::OverCurrent)
+        {
+            hw_uart_puts(
+                "[TEST] OVER-CURRENT DETECTED\r\n"
+            );
+
+            /*
+             * Important:
+             *
+             * The controller owns Safe Mode.
+             *
+             * Therefore we explicitly tell the
+             * controller that a hardware fault occurred.
+             */
+
+            if (g_controller != nullptr)
+            {
+                g_controller->enterSafeMode(
+                    result.error
+                );
+            }
+        }
+        else
+        {
+            hw_uart_puts(
+                "[TEST] ERROR: OVER-CURRENT TEST FAILED\r\n"
+            );
+        }
+    }
+
+
+    /* ========================================================
+     * PHASE 6
+     *
+     * Test complete
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[TEST] FAULT TEST COMPLETE\r\n"
+    );
+
+
+    /* ========================================================
+     * Keep task alive
+     * ======================================================== */
 
     for (;;)
     {
@@ -514,6 +588,18 @@ extern "C" int main(void)
     hw_init();
 
     hw_gpio_init();
+
+    hw_uart_puts(
+        "\r\n==============================\r\n"
+    );
+
+    hw_uart_puts(
+        "STM32F4 QEMU START\r\n"
+    );
+
+    hw_uart_puts(
+        "==============================\r\n"
+    );
 
     hw_uart_puts(
         "[MAIN] Hardware initialized\r\n"
@@ -542,7 +628,7 @@ extern "C" int main(void)
 
 
     /* ========================================================
-     * SELECT CONTROL STRATEGY
+     * DAMPING STRATEGY
      * ======================================================== */
 
     controller.setStrategy(
@@ -551,12 +637,12 @@ extern "C" int main(void)
 
 
     /* ========================================================
-     * STORE GLOBAL REFERENCES
+     * GLOBAL REFERENCES
      * ======================================================== */
 
     g_controller = &controller;
-
     g_sensor = &sensor;
+    g_coil = &coil;
 
 
     hw_uart_puts(
@@ -572,15 +658,15 @@ extern "C" int main(void)
         "[MAIN] Creating CONTROL task\r\n"
     );
 
-    BaseType_t result = xTaskCreate(
-        control_task,
-        "CONTROL",
-        512,
-        nullptr,
-        2,
-        nullptr
-    );
-
+    BaseType_t result =
+        xTaskCreate(
+            control_task,
+            "CONTROL",
+            512,
+            nullptr,
+            2,
+            nullptr
+        );
 
     if (result != pdPASS)
     {
@@ -593,7 +679,6 @@ extern "C" int main(void)
             __asm volatile ("nop");
         }
     }
-
 
     hw_uart_puts(
         "[MAIN] CONTROL task created successfully\r\n"
@@ -608,15 +693,15 @@ extern "C" int main(void)
         "[MAIN] Creating TELEMETRY task\r\n"
     );
 
-    result = xTaskCreate(
-        telemetry_task,
-        "TELEMETRY",
-        512,
-        nullptr,
-        1,
-        nullptr
-    );
-
+    result =
+        xTaskCreate(
+            telemetry_task,
+            "TELEMETRY",
+            512,
+            nullptr,
+            1,
+            nullptr
+        );
 
     if (result != pdPASS)
     {
@@ -630,36 +715,35 @@ extern "C" int main(void)
         }
     }
 
-
     hw_uart_puts(
         "[MAIN] TELEMETRY task created successfully\r\n"
     );
 
 
     /* ========================================================
-     * CREATE SENSOR TEST TASK
+     * CREATE FAULT TEST TASK
      *
      * QEMU ONLY
      * ======================================================== */
 
     hw_uart_puts(
-        "[MAIN] Creating SENSOR TEST task\r\n"
+        "[MAIN] Creating FAULT TEST task\r\n"
     );
 
-    result = xTaskCreate(
-        sensor_fault_test_task,
-        "SENSOR_TEST",
-        256,
-        nullptr,
-        1,
-        nullptr
-    );
-
+    result =
+        xTaskCreate(
+            fault_test_task,
+            "FAULT_TEST",
+            512,
+            nullptr,
+            1,
+            nullptr
+        );
 
     if (result != pdPASS)
     {
         hw_uart_puts(
-            "[MAIN] ERROR: SENSOR TEST task creation failed\r\n"
+            "[MAIN] ERROR: FAULT TEST task creation failed\r\n"
         );
 
         for (;;)
@@ -668,14 +752,13 @@ extern "C" int main(void)
         }
     }
 
-
     hw_uart_puts(
-        "[MAIN] SENSOR TEST task created successfully\r\n"
+        "[MAIN] FAULT TEST task created successfully\r\n"
     );
 
 
     /* ========================================================
-     * START FREERTOS SCHEDULER
+     * START FREERTOS
      * ======================================================== */
 
     hw_uart_puts(
@@ -686,13 +769,12 @@ extern "C" int main(void)
 
 
     /* ========================================================
-     * SCHEDULER SHOULD NEVER RETURN
+     * SHOULD NEVER REACH HERE
      * ======================================================== */
 
     hw_uart_puts(
         "[MAIN] ERROR: Scheduler returned!\r\n"
     );
-
 
     for (;;)
     {

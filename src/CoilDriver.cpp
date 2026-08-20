@@ -1,13 +1,20 @@
-
 #include "CoilDriver.hpp"
 
+
+/* ============================================================
+ * Set coil current
+ * ============================================================ */
 
 CoilResult CoilDriver::setCurrent(
     float requestedCurrentAmps,
     float temperatureCelsius) noexcept
 {
-    // Thermal shutdown guardrail
-    if (temperatureCelsius >= MAX_SAFE_TEMP_CELSIUS)
+    /* ========================================================
+     * OVER TEMPERATURE
+     * ======================================================== */
+
+    if (temperatureCelsius >=
+        MAX_SAFE_TEMP_CELSIUS)
     {
         currentAmps_ = 0.0f;
 
@@ -17,18 +24,21 @@ CoilResult CoilDriver::setCurrent(
         };
     }
 
-    // Over-current guardrail
-    if (requestedCurrentAmps > MAX_SAFE_CURRENT_AMPS)
-    {
-        currentAmps_ = MAX_SAFE_CURRENT_AMPS;
 
-        return CoilResult{
-            CoilError::OverCurrent,
-            currentAmps_
-        };
-    }
+    /* ========================================================
+     * NEGATIVE CURRENT
+     *
+     * This actuator is one-directional.
+     *
+     * Example:
+     *
+     *     -4 N force
+     *          ↓
+     *     requested current = -0.04 A
+     *          ↓
+     *     clamp to 0 A
+     * ======================================================== */
 
-    // Negative current prevention
     if (requestedCurrentAmps < 0.0f)
     {
         currentAmps_ = 0.0f;
@@ -39,7 +49,30 @@ CoilResult CoilDriver::setCurrent(
         };
     }
 
-    currentAmps_ = requestedCurrentAmps;
+
+    /* ========================================================
+     * OVER CURRENT
+     * ======================================================== */
+
+    if (requestedCurrentAmps >
+        MAX_SAFE_CURRENT_AMPS)
+    {
+        currentAmps_ =
+            MAX_SAFE_CURRENT_AMPS;
+
+        return CoilResult{
+            CoilError::OverCurrent,
+            currentAmps_
+        };
+    }
+
+
+    /* ========================================================
+     * NORMAL
+     * ======================================================== */
+
+    currentAmps_ =
+        requestedCurrentAmps;
 
     return CoilResult{
         CoilError::None,
@@ -48,28 +81,41 @@ CoilResult CoilDriver::setCurrent(
 }
 
 
+/* ============================================================
+ * Generic command interface
+ * ============================================================ */
+
 ErrorCode CoilDriver::apply(
     const DampingCommand& command)
 {
-    if (command.coilCurrentAmps < MIN_SAFE_CURRENT_AMPS)
+    if (command.coilCurrentAmps < 0.0f)
     {
-        currentAmps_ = MIN_SAFE_CURRENT_AMPS;
+        currentAmps_ = 0.0f;
 
         return ErrorCode::COIL_INVALID_NEGATIVE_CURRENT;
     }
 
-    if (command.coilCurrentAmps > MAX_SAFE_CURRENT_AMPS)
+
+    if (command.coilCurrentAmps >
+        MAX_SAFE_CURRENT_AMPS)
     {
-        currentAmps_ = MAX_SAFE_CURRENT_AMPS;
+        currentAmps_ =
+            MAX_SAFE_CURRENT_AMPS;
 
         return ErrorCode::COIL_OVERCURRENT_CLAMPED;
     }
 
-    currentAmps_ = command.coilCurrentAmps;
+
+    currentAmps_ =
+        command.coilCurrentAmps;
 
     return ErrorCode::SUCCESS;
 }
 
+
+/* ============================================================
+ * Get actual current
+ * ============================================================ */
 
 float CoilDriver::current() const noexcept
 {
@@ -79,20 +125,6 @@ float CoilDriver::current() const noexcept
 
 /* ============================================================
  * QEMU OVER-CURRENT TEST
- *
- * Deliberately requests 6 A.
- *
- * Safe limit = 5 A
- *
- * Expected:
- *
- * requested = 6 A
- *       ↓
- * CoilDriver
- *       ↓
- * OverCurrent
- *       ↓
- * actual current = 5 A
  * ============================================================ */
 
 CoilResult CoilDriver::injectOverCurrentTest() noexcept
