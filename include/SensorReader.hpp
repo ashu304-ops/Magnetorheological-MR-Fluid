@@ -10,7 +10,9 @@ public:
         float initialG = 0.0f
     ) noexcept;
 
+
     SensorReadResult read() noexcept override;
+
 
     /* ========================================================
      * QEMU TEST HELPERS
@@ -20,15 +22,21 @@ public:
         float gForce
     ) noexcept;
 
+
+    void clearHardwareInjection() noexcept;
+
+
     void injectTimeout(
         bool timedOut
     ) noexcept;
+
 
 private:
 
     float readHardware() const noexcept;
 
     bool communicationTimedOut() const noexcept;
+
 
 private:
 

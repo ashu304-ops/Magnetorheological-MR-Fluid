@@ -2,12 +2,13 @@
 
 
 /* ============================================================
- * Set coil current
+ * SET COIL CURRENT
  * ============================================================ */
 
 CoilResult CoilDriver::setCurrent(
     float requestedCurrentAmps,
-    float temperatureCelsius) noexcept
+    float temperatureCelsius
+) noexcept
 {
     /* ========================================================
      * OVER TEMPERATURE
@@ -16,7 +17,8 @@ CoilResult CoilDriver::setCurrent(
     if (temperatureCelsius >=
         MAX_SAFE_TEMP_CELSIUS)
     {
-        currentAmps_ = 0.0f;
+        currentAmps_ =
+            0.0f;
 
         return CoilResult{
             CoilError::OverTemperature,
@@ -28,24 +30,20 @@ CoilResult CoilDriver::setCurrent(
     /* ========================================================
      * NEGATIVE CURRENT
      *
-     * This actuator is one-directional.
+     * One-directional actuator.
      *
-     * Example:
-     *
-     *     -4 N force
-     *          ↓
-     *     requested current = -0.04 A
-     *          ↓
-     *     clamp to 0 A
+     * Negative request is safely clamped to zero.
      * ======================================================== */
 
-    if (requestedCurrentAmps < 0.0f)
+    if (requestedCurrentAmps <
+        MIN_SAFE_CURRENT_AMPS)
     {
-        currentAmps_ = 0.0f;
+        currentAmps_ =
+            MIN_SAFE_CURRENT_AMPS;
 
         return CoilResult{
             CoilError::None,
-            0.0f
+            currentAmps_
         };
     }
 
@@ -82,15 +80,18 @@ CoilResult CoilDriver::setCurrent(
 
 
 /* ============================================================
- * Generic command interface
+ * GENERIC COMMAND INTERFACE
  * ============================================================ */
 
 ErrorCode CoilDriver::apply(
-    const DampingCommand& command)
+    const DampingCommand& command
+)
 {
-    if (command.coilCurrentAmps < 0.0f)
+    if (command.coilCurrentAmps <
+        MIN_SAFE_CURRENT_AMPS)
     {
-        currentAmps_ = 0.0f;
+        currentAmps_ =
+            MIN_SAFE_CURRENT_AMPS;
 
         return ErrorCode::COIL_INVALID_NEGATIVE_CURRENT;
     }
@@ -114,7 +115,7 @@ ErrorCode CoilDriver::apply(
 
 
 /* ============================================================
- * Get actual current
+ * CURRENT
  * ============================================================ */
 
 float CoilDriver::current() const noexcept
@@ -125,11 +126,21 @@ float CoilDriver::current() const noexcept
 
 /* ============================================================
  * QEMU OVER-CURRENT TEST
+ *
+ * 6 A requested
+ * 5 A maximum safe current
+ *
+ * Expected:
+ *
+ * requested = 6.0 A
+ * actual    = 5.0 A
+ * error     = OverCurrent
  * ============================================================ */
 
 CoilResult CoilDriver::injectOverCurrentTest() noexcept
 {
-    constexpr float TEST_CURRENT_AMPS = 6.0f;
+    constexpr float TEST_CURRENT_AMPS =
+        6.0f;
 
     return setCurrent(
         TEST_CURRENT_AMPS,

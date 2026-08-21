@@ -11,22 +11,6 @@
 #include "RingBuffer.hpp"
 
 
-/* ============================================================
- * CONTROLLER STATE
- * ============================================================ */
-
-enum class ControllerState
-{
-    Normal,
-    SensorSafeMode,
-    CoilSafeMode
-};
-
-
-/* ============================================================
- * SUSPENSION CONTROLLER
- * ============================================================ */
-
 class SuspensionController
 {
 public:
@@ -62,29 +46,15 @@ public:
     ) noexcept;
 
 
-    /* ========================================================
-     * EXPLICIT COIL FAULT RECOVERY
-     * ======================================================== */
-
+    /*
+     * Explicit recovery from a latched coil fault.
+     *
+     * This is intentionally NOT automatic.
+     *
+     * The application/test must explicitly call this
+     * after the coil fault has been cleared.
+     */
     void clearCoilFault() noexcept;
-
-
-    /* ========================================================
-     * STATE
-     * ======================================================== */
-
-    [[nodiscard]]
-    ControllerState state() const noexcept
-    {
-        return state_;
-    }
-
-
-    [[nodiscard]]
-    bool isSafeMode() const noexcept
-    {
-        return state_ != ControllerState::Normal;
-    }
 
 
     /* ========================================================
@@ -134,6 +104,13 @@ public:
 
 
     [[nodiscard]]
+    bool isSafeMode() const noexcept
+    {
+        return safeMode_;
+    }
+
+
+    [[nodiscard]]
     const RingBuffer<float, 32>&
     getRecentForceHistory() const noexcept
     {
@@ -143,10 +120,6 @@ public:
 
 private:
 
-    /* ========================================================
-     * HARDWARE / INTERFACES
-     * ======================================================== */
-
     ISensorReader& sensor_;
 
     ICoilDriver& coil_;
@@ -154,39 +127,16 @@ private:
     ITelemetryLogger& logger_;
 
 
-    /* ========================================================
-     * CONTROL STRATEGY
-     * ======================================================== */
-
     std::unique_ptr<IDampingStrategy> strategy_;
 
 
-    /* ========================================================
-     * SIGNAL PROCESSING
-     * ======================================================== */
-
+    /* Fixed-size filter. */
     SignalFilter<5> filter_;
 
 
-    /* ========================================================
-     * FORCE HISTORY
-     * ======================================================== */
-
+    /* Fixed-capacity force history. */
     RingBuffer<float, 32> forceHistory_{};
 
-
-    /* ========================================================
-     * CONTROLLER STATE
-     * ======================================================== */
-
-    ControllerState state_{
-        ControllerState::Normal
-    };
-
-
-    /* ========================================================
-     * TELEMETRY STATE
-     * ======================================================== */
 
     float lastAccelerationG_{0.0f};
 
@@ -205,6 +155,15 @@ private:
     CoilError lastCoilError_{
         CoilError::None
     };
+
+
+    bool safeMode_{false};
+
+    /*
+     * A coil fault is latched until an explicit
+     * clearCoilFault() call is made.
+     */
+    bool coilFaultLatched_{false};
 };
 
 

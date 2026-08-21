@@ -23,7 +23,7 @@ public:
 
 
     /* ========================================================
-     * QEMU TEST
+     * QEMU OVER-CURRENT TEST
      * ======================================================== */
 
     CoilResult injectOverCurrentTest() noexcept;

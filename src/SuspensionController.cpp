@@ -37,35 +37,46 @@ void SuspensionController::setStrategy(
 
 
 /* ============================================================
- * CONTROL CYCLE
+ * RUN CONTROL CYCLE
  *
  * 100 Hz
  *
- *                    ┌──────────────┐
- *                    │    NORMAL    │
- *                    └──────┬───────┘
- *                           │
- *                sensor fault / coil fault
- *                    ┌──────┴──────┐
- *                    ▼             ▼
- *             SENSOR SAFE      COIL SAFE
- *                    │             │
- *             sensor recovered    │
- *                    │       explicit clear
- *                    ▼             │
- *                  NORMAL <────────┘
+ * NORMAL
+ *    |
+ *    +---- Sensor fault --------> SENSOR SAFE MODE
+ *    |                              |
+ *    |                              +-- sensor recovery
+ *    |                                      |
+ *    |                                      v
+ *    |                                    NORMAL
+ *    |
+ *    +---- Coil fault ----------> COIL SAFE MODE
+ *                                   |
+ *                                   +-- explicit clear
+ *                                          |
+ *                                          v
+ *                                        NORMAL
  *
- * SENSOR SAFE:
- *      Automatically recovers when sensor becomes healthy.
- *
- * COIL SAFE:
- *      Remains latched until clearCoilFault() is called.
+ * Thermal protection is treated as a coil fault.
  * ============================================================ */
 
 void SuspensionController::runCycle(
     float ambientTempC
 ) noexcept
 {
+    /* ========================================================
+     * CURRENT CYCLE ERROR RESET
+     *
+     * Do not erase a latched coil fault.
+     * ======================================================== */
+
+    if (!coilFaultLatched_)
+    {
+        lastCoilError_ =
+            CoilError::None;
+    }
+
+
     /* ========================================================
      * THERMAL MODEL
      * ======================================================== */
@@ -78,10 +89,16 @@ void SuspensionController::runCycle(
         lastRequestedCurrentA_;
 
 
+    /*
+     * Simple simulated I² heating model.
+     */
     const float heatingRate =
         currentSquared * 15.0f;
 
 
+    /*
+     * Simple cooling model.
+     */
     const float coolingRate =
         (lastTemperatureC_ - ambientTempC) *
         0.40f;
@@ -91,6 +108,9 @@ void SuspensionController::runCycle(
         (heatingRate - coolingRate) * dt;
 
 
+    /*
+     * Temperature must not fall below ambient.
+     */
     if (lastTemperatureC_ < ambientTempC)
     {
         lastTemperatureC_ =
@@ -114,16 +134,13 @@ void SuspensionController::runCycle(
 
 
     /* ========================================================
-     * COIL SAFE MODE
+     * EXISTING COIL FAULT LATCH
      *
-     * A coil fault is latched.
-     *
-     * Do not execute normal control until
-     * clearCoilFault() is explicitly called.
+     * If a coil fault already occurred, do not continue
+     * normal control operation.
      * ======================================================== */
 
-    if (state_ ==
-        ControllerState::CoilSafeMode)
+    if (coilFaultLatched_)
     {
         return;
     }
@@ -162,6 +179,8 @@ void SuspensionController::runCycle(
 
     if (!sensorResult.success())
     {
+        filter_.reset();
+
         enterSafeMode(
             sensorResult.error
         );
@@ -174,21 +193,20 @@ void SuspensionController::runCycle(
      * SENSOR SAFE MODE RECOVERY
      * ======================================================== */
 
-    if (state_ ==
-        ControllerState::SensorSafeMode)
+    if (safeMode_)
     {
         /*
-         * Sensor is healthy again.
+         * At this point the only remaining safe-mode source
+         * should be a sensor fault.
          *
-         * Discard old filter history because it
-         * may contain stale values from the fault.
+         * Coil faults are handled above by coilFaultLatched_.
          */
 
         filter_.reset();
 
 
-        state_ =
-            ControllerState::Normal;
+        safeMode_ =
+            false;
 
 
         lastSensorError_ =
@@ -252,11 +270,6 @@ void SuspensionController::runCycle(
 
     /* ========================================================
      * FORCE -> CURRENT
-     *
-     * Example:
-     *
-     *   4 N  ->  0.04 A
-     *  -4 N  -> -0.04 A
      * ======================================================== */
 
     const float requestedCurrentA =
@@ -313,15 +326,22 @@ void SuspensionController::runCycle(
 
 
 /* ============================================================
- * ENTER SAFE MODE - SENSOR FAULT
+ * SENSOR SAFE MODE
  * ============================================================ */
 
 void SuspensionController::enterSafeMode(
     SensorError error
 ) noexcept
 {
-    state_ =
-        ControllerState::SensorSafeMode;
+    safeMode_ =
+        true;
+
+
+    /*
+     * Sensor faults do not create a persistent coil latch.
+     */
+    coilFaultLatched_ =
+        false;
 
 
     lastSensorError_ =
@@ -340,7 +360,7 @@ void SuspensionController::enterSafeMode(
 
 
     /* --------------------------------------------------------
-     * FORCE COIL OFF
+     * Force coil OFF.
      * -------------------------------------------------------- */
 
     const CoilResult result =
@@ -350,20 +370,27 @@ void SuspensionController::enterSafeMode(
         );
 
 
-    /*
-     * The coil may successfully accept the
-     * safe 0 A command.
-     *
-     * Therefore do not treat result.error as
-     * the original sensor fault.
-     */
-
     lastRequestedCurrentA_ =
         result.actualCurrentAmps;
 
 
-    lastCoilError_ =
-        result.error;
+    /*
+     * Preserve sensor error as the primary fault.
+     *
+     * Only expose a coil error if the safe 0A command itself
+     * fails.
+     */
+
+    if (!result.success())
+    {
+        lastCoilError_ =
+            result.error;
+    }
+    else
+    {
+        lastCoilError_ =
+            CoilError::None;
+    }
 
 
     logger_.recordSensorError(
@@ -373,25 +400,29 @@ void SuspensionController::enterSafeMode(
 
 
 /* ============================================================
- * ENTER SAFE MODE - COIL FAULT
+ * COIL SAFE MODE
  * ============================================================ */
 
 void SuspensionController::enterSafeMode(
     CoilError error
 ) noexcept
 {
-    state_ =
-        ControllerState::CoilSafeMode;
+    safeMode_ =
+        true;
 
 
     /*
-     * IMPORTANT:
+     * ALL coil faults are latched.
      *
-     * Preserve the original coil fault.
+     * This includes:
      *
-     * This fault remains active until
-     * clearCoilFault() is explicitly called.
+     * - OverCurrent
+     * - OverTemperature
+     * - HardwareFault
      */
+    coilFaultLatched_ =
+        true;
+
 
     lastCoilError_ =
         error;
@@ -409,7 +440,7 @@ void SuspensionController::enterSafeMode(
 
 
     /* --------------------------------------------------------
-     * FORCE COIL OFF
+     * Force coil OFF.
      * -------------------------------------------------------- */
 
     const CoilResult result =
@@ -419,21 +450,18 @@ void SuspensionController::enterSafeMode(
         );
 
 
-    /*
-     * Do NOT overwrite lastCoilError_ here.
-     *
-     * result.error belongs to the safe 0 A command.
-     *
-     * We need to preserve the original fault:
-     *
-     *     OVER_CURRENT
-     *
-     *     OVER_TEMPERATURE
-     * -------------------------------------------------------- */
-
     lastRequestedCurrentA_ =
         result.actualCurrentAmps;
 
+
+    /*
+     * IMPORTANT:
+     *
+     * Keep the ORIGINAL fault.
+     *
+     * Do not replace OverTemperature or OverCurrent with
+     * the result of the safe 0A command.
+     */
 
     logger_.recordCoilError(
         error
@@ -444,35 +472,114 @@ void SuspensionController::enterSafeMode(
 /* ============================================================
  * CLEAR COIL FAULT
  *
- * Explicit recovery mechanism.
- *
- * COIL SAFE
- *     |
- *     | clearCoilFault()
- *     v
- * NORMAL
+ * Explicit recovery.
  * ============================================================ */
 
 void SuspensionController::clearCoilFault() noexcept
 {
-    /*
-     * Nothing to clear if we are not in
-     * coil safe mode.
-     */
+    /* ========================================================
+     * Nothing to clear
+     * ======================================================== */
 
-    if (state_ !=
-        ControllerState::CoilSafeMode)
+    if (!coilFaultLatched_)
     {
         return;
     }
 
 
-    /* --------------------------------------------------------
-     * Clear controller state.
-     * -------------------------------------------------------- */
+    /* ========================================================
+     * TEMPERATURE CHECK
+     *
+     * Never clear an over-temperature fault while the system
+     * is still above the safe operating temperature.
+     * ======================================================== */
 
-    state_ =
-        ControllerState::Normal;
+    if (lastTemperatureC_ >=
+        MAX_SAFE_TEMP_CELSIUS)
+    {
+        lastCoilError_ =
+            CoilError::OverTemperature;
+
+
+        safeMode_ =
+            true;
+
+
+        coilFaultLatched_ =
+            true;
+
+
+        lastForceN_ =
+            0.0f;
+
+
+        lastRequestedCurrentA_ =
+            0.0f;
+
+
+        hw_uart_puts(
+            "[CTRL] COIL FAULT CLEAR BLOCKED - TEMPERATURE TOO HIGH\r\n"
+        );
+
+        return;
+    }
+
+
+    /* ========================================================
+     * FORCE COIL OFF FIRST
+     * ======================================================== */
+
+    const CoilResult result =
+        coil_.setCurrent(
+            0.0f,
+            lastTemperatureC_
+        );
+
+
+    /* ========================================================
+     * SAFE OUTPUT FAILED
+     * ======================================================== */
+
+    if (!result.success())
+    {
+        lastCoilError_ =
+            result.error;
+
+
+        safeMode_ =
+            true;
+
+
+        coilFaultLatched_ =
+            true;
+
+
+        lastForceN_ =
+            0.0f;
+
+
+        lastRequestedCurrentA_ =
+            result.actualCurrentAmps;
+
+
+        hw_uart_puts(
+            "[CTRL] COIL FAULT CLEAR FAILED\r\n"
+        );
+
+        return;
+    }
+
+
+    /* ========================================================
+     * CLEAR FAULT
+     * ======================================================== */
+
+    coilFaultLatched_ =
+        false;
+
+
+    safeMode_ =
+        false;
 
 
     lastCoilError_ =
@@ -494,25 +601,23 @@ void SuspensionController::clearCoilFault() noexcept
     filter_.reset();
 
 
-    /* --------------------------------------------------------
-     * Keep actuator OFF during the transition.
-     *
-     * Normal current will only be calculated
-     * during the next control cycle.
-     * -------------------------------------------------------- */
-
-    const CoilResult result =
-        coil_.setCurrent(
-            0.0f,
-            lastTemperatureC_
-        );
-
-
-    lastRequestedCurrentA_ =
-        result.actualCurrentAmps;
+    forceHistory_ =
+        RingBuffer<float, 32>{};
 
 
     hw_uart_puts(
-        "[CTRL] COIL FAULT CLEARED\r\n"
+        "[CTRL] COIL FAULT CLEARED - EXITING SAFE MODE\r\n"
     );
 }
+
+
+/* ============================================================
+ * QEMU OVER-TEMPERATURE TEST
+ *
+ * TEST ONLY.
+ *
+ * Force temperature to the safety threshold so the next
+ * control cycle exercises the actual thermal safety logic.
+ * ============================================================ */
+
+

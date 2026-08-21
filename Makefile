@@ -40,7 +40,9 @@ SRCS_CPP = \
     src/CoilDriver.cpp \
     src/TelemetryLogger.cpp \
     src/TelemetryFormatter.cpp \
-    src/ComfortStrategy.cpp
+    src/ComfortStrategy.cpp \
+    src/TelemetryPublisher.cpp\
+    src/MqttClient.cpp
 
 
 # ============================================================

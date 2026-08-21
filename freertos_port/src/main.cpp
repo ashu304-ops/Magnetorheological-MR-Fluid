@@ -1,3 +1,4 @@
+
 extern "C"
 {
 #include "FreeRTOS.h"
@@ -11,11 +12,14 @@ extern "C"
 #include "SensorReader.hpp"
 #include "CoilDriver.hpp"
 #include "TelemetryLogger.hpp"
+#include "TelemetryPublisher.hpp"
+#include "TelemetryData.hpp"
+#include "MqttClient.hpp"
 #include "ComfortStrategy.hpp"
 
 
 /* ============================================================
- * Hardware functions
+ * HARDWARE FUNCTIONS
  * ============================================================ */
 
 extern "C" void hw_init(void);
@@ -24,7 +28,7 @@ extern "C" void hw_uart_puts(const char* str);
 
 
 /* ============================================================
- * Global application references
+ * GLOBAL APPLICATION REFERENCES
  * ============================================================ */
 
 static SuspensionController* g_controller = nullptr;
@@ -33,12 +37,13 @@ static CoilDriver* g_coil = nullptr;
 
 
 /* ============================================================
- * FORMAT FLOAT - 2 DECIMAL PLACES
+ * FLOAT FORMAT - 2 DECIMAL PLACES
  * ============================================================ */
 
 static void format2(
     float value,
-    char* buffer)
+    char* buffer
+)
 {
     int32_t scaled;
 
@@ -102,12 +107,13 @@ static void format2(
 
 
 /* ============================================================
- * FORMAT FLOAT - 3 DECIMAL PLACES
+ * FLOAT FORMAT - 3 DECIMAL PLACES
  * ============================================================ */
 
 static void format3(
     float value,
-    char* buffer)
+    char* buffer
+)
 {
     int32_t scaled;
 
@@ -137,6 +143,13 @@ static void format3(
 
     const int32_t decimalPart =
         scaled % 1000;
+
+    if (integerPart >= 100)
+    {
+        *p++ = static_cast<char>(
+            '0' + (integerPart / 100) % 10
+        );
+    }
 
     if (integerPart >= 10)
     {
@@ -172,7 +185,8 @@ static void format3(
  * ============================================================ */
 
 static const char* sensorErrorToString(
-    SensorError error)
+    SensorError error
+)
 {
     switch (error)
     {
@@ -205,7 +219,8 @@ static const char* sensorErrorToString(
  * ============================================================ */
 
 static const char* coilErrorToString(
-    CoilError error)
+    CoilError error
+)
 {
     switch (error)
     {
@@ -228,7 +243,9 @@ static const char* coilErrorToString(
 
 
 /* ============================================================
- * TELEMETRY
+ * LOCAL UART TELEMETRY
+ *
+ * Keeps the QEMU output useful for debugging.
  * ============================================================ */
 
 static void printTelemetry()
@@ -263,7 +280,6 @@ static void printTelemetry()
         temperature
     );
 
-
     hw_uart_puts("[TEL] acc=");
     hw_uart_puts(acceleration);
 
@@ -278,10 +294,6 @@ static void printTelemetry()
 
     hw_uart_puts("C\r\n");
 
-
-    /* --------------------------------------------------------
-     * SAFE MODE
-     * -------------------------------------------------------- */
 
     if (g_controller->isSafeMode())
     {
@@ -324,7 +336,8 @@ static void printTelemetry()
  * ============================================================ */
 
 static void control_task(
-    void* argument)
+    void* argument
+)
 {
     (void)argument;
 
@@ -361,10 +374,21 @@ static void control_task(
  * TELEMETRY TASK
  *
  * 1 Hz
+ *
+ * Controller
+ *      ↓
+ * TelemetryData
+ *      ↓
+ * TelemetryPublisher
+ *      ↓
+ * MqttClient
+ *      ↓
+ * MQTT transport
  * ============================================================ */
 
 static void telemetry_task(
-    void* argument)
+    void* argument
+)
 {
     (void)argument;
 
@@ -372,9 +396,127 @@ static void telemetry_task(
         "[TASK] TELEMETRY task started\r\n"
     );
 
+
+    /* --------------------------------------------------------
+     * MQTT client.
+     *
+     * Static because this is an embedded application.
+     * -------------------------------------------------------- */
+
+    static MqttClient mqttClient;
+
+
+    /* --------------------------------------------------------
+     * Telemetry publisher uses dependency injection.
+     * -------------------------------------------------------- */
+
+    static TelemetryPublisher publisher(
+        mqttClient
+    );
+
+
+    /* --------------------------------------------------------
+     * Connect once before publishing.
+     * -------------------------------------------------------- */
+
+    hw_uart_puts(
+        "[MQTT] Initializing publisher...\r\n"
+    );
+
+    if (!mqttClient.connect())
+    {
+        hw_uart_puts(
+            "[MQTT] ERROR: Initial connection failed\r\n"
+        );
+    }
+    else
+    {
+        hw_uart_puts(
+            "[MQTT] Publisher ready\r\n"
+        );
+    }
+
+
+    /* ========================================================
+     * TELEMETRY LOOP
+     * ======================================================== */
+
     for (;;)
     {
-        printTelemetry();
+        if (g_controller != nullptr)
+        {
+            /* =================================================
+             * CREATE TELEMETRY DATA
+             * ================================================= */
+
+            TelemetryData data{};
+
+            data.accelerationG =
+                g_controller->lastAccelerationG();
+
+            data.forceN =
+                g_controller->lastForceN();
+
+            data.currentA =
+                g_controller->lastRequestedCurrentA();
+
+            data.temperatureC =
+                g_controller->lastTemperatureC();
+
+            data.safeMode =
+                g_controller->isSafeMode();
+
+            data.sensorError =
+                static_cast<uint8_t>(
+                    g_controller->lastSensorError()
+                );
+
+            data.coilError =
+                static_cast<uint8_t>(
+                    g_controller->lastCoilError()
+                );
+
+
+            /* =================================================
+             * TIMESTAMP
+             *
+             * FreeRTOS tick → milliseconds
+             * ================================================= */
+
+            data.timestampMs =
+                static_cast<uint32_t>(
+                    xTaskGetTickCount()
+                    *
+                    portTICK_PERIOD_MS
+                );
+
+
+            /* =================================================
+             * LOCAL DEBUG OUTPUT
+             * ================================================= */
+
+            printTelemetry();
+
+
+            /* =================================================
+             * MQTT PUBLISH
+             * ================================================= */
+
+            const bool published =
+                publisher.publish(data);
+
+            if (!published)
+            {
+                hw_uart_puts(
+                    "[MQTT] ERROR: Telemetry publish failed\r\n"
+                );
+            }
+        }
+
+
+        /* ----------------------------------------------------
+         * 1 Hz telemetry
+         * ---------------------------------------------------- */
 
         vTaskDelay(
             pdMS_TO_TICKS(1000)
@@ -387,48 +529,11 @@ static void telemetry_task(
  * SENSOR + COIL FAULT TEST TASK
  *
  * QEMU ONLY
- *
- * Timeline:
- *
- * 0 - 3 sec
- *     Normal operation
- *
- * 3 sec
- *     Sensor timeout
- *
- * 3 - 6 sec
- *     Safe mode
- *
- * 6 sec
- *     Sensor recovery
- *
- * 6 - 9 sec
- *     Normal operation
- *
- * 9 sec
- *     Over-current injection
- *
- * Expected:
- *
- * NORMAL
- *    ↓
- * SENSOR TIMEOUT
- *    ↓
- * SAFE MODE
- *    ↓
- * COIL = 0 A
- *    ↓
- * SENSOR RECOVERY
- *    ↓
- * NORMAL
- *    ↓
- * OVER CURRENT
- *    ↓
- * SAFE MODE
  * ============================================================ */
 
 static void fault_test_task(
-    void* argument)
+    void* argument
+)
 {
     (void)argument;
 
@@ -438,9 +543,7 @@ static void fault_test_task(
 
 
     /* ========================================================
-     * PHASE 1
-     *
-     * Normal operation
+     * NORMAL OPERATION
      * ======================================================== */
 
     hw_uart_puts(
@@ -453,9 +556,7 @@ static void fault_test_task(
 
 
     /* ========================================================
-     * PHASE 2
-     *
-     * Sensor timeout
+     * SENSOR TIMEOUT
      * ======================================================== */
 
     if (g_sensor != nullptr)
@@ -468,21 +569,13 @@ static void fault_test_task(
     }
 
 
-    /* ========================================================
-     * PHASE 3
-     *
-     * Keep sensor failed for 3 seconds
-     * ======================================================== */
-
     vTaskDelay(
         pdMS_TO_TICKS(3000)
     );
 
 
     /* ========================================================
-     * PHASE 4
-     *
-     * Sensor recovery
+     * SENSOR RECOVERY
      * ======================================================== */
 
     if (g_sensor != nullptr)
@@ -495,18 +588,12 @@ static void fault_test_task(
     }
 
 
-    /* ========================================================
-     * Give control task time to recover
-     * ======================================================== */
-
     vTaskDelay(
         pdMS_TO_TICKS(3000)
     );
 
 
     /* ========================================================
-     * PHASE 5
-     *
      * OVER-CURRENT TEST
      * ======================================================== */
 
@@ -519,21 +606,13 @@ static void fault_test_task(
         const CoilResult result =
             g_coil->injectOverCurrentTest();
 
+
         if (result.error ==
             CoilError::OverCurrent)
         {
             hw_uart_puts(
                 "[TEST] OVER-CURRENT DETECTED\r\n"
             );
-
-            /*
-             * Important:
-             *
-             * The controller owns Safe Mode.
-             *
-             * Therefore we explicitly tell the
-             * controller that a hardware fault occurred.
-             */
 
             if (g_controller != nullptr)
             {
@@ -552,9 +631,7 @@ static void fault_test_task(
 
 
     /* ========================================================
-     * PHASE 6
-     *
-     * Test complete
+     * FAULT TEST COMPLETE
      * ======================================================== */
 
     hw_uart_puts(
@@ -563,7 +640,48 @@ static void fault_test_task(
 
 
     /* ========================================================
-     * Keep task alive
+     * WAIT BEFORE RECOVERY
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[TEST] Waiting before COIL fault recovery...\r\n"
+    );
+
+    vTaskDelay(
+        pdMS_TO_TICKS(2000)
+    );
+
+
+    /* ========================================================
+     * CLEAR COIL FAULT
+     * ======================================================== */
+
+    hw_uart_puts(
+        "[TEST] Clearing COIL fault...\r\n"
+    );
+
+    if (g_controller != nullptr)
+    {
+        g_controller->clearCoilFault();
+    }
+
+
+    /* ========================================================
+     * RECOVERY STABILIZATION
+     * ======================================================== */
+
+    vTaskDelay(
+        pdMS_TO_TICKS(1000)
+    );
+
+
+    hw_uart_puts(
+        "[TEST] COIL fault recovery complete\r\n"
+    );
+
+
+    /* ========================================================
+     * KEEP TASK ALIVE
      * ======================================================== */
 
     for (;;)
@@ -588,6 +706,7 @@ extern "C" int main(void)
     hw_init();
 
     hw_gpio_init();
+
 
     hw_uart_puts(
         "\r\n==============================\r\n"
@@ -614,11 +733,13 @@ extern "C" int main(void)
         "[MAIN] Creating application objects\r\n"
     );
 
+
     static SensorReader sensor;
 
     static CoilDriver coil;
 
     static TelemetryLogger logger;
+
 
     static SuspensionController controller(
         sensor,
@@ -640,9 +761,14 @@ extern "C" int main(void)
      * GLOBAL REFERENCES
      * ======================================================== */
 
-    g_controller = &controller;
-    g_sensor = &sensor;
-    g_coil = &coil;
+    g_controller =
+        &controller;
+
+    g_sensor =
+        &sensor;
+
+    g_coil =
+        &coil;
 
 
     hw_uart_puts(
@@ -651,7 +777,7 @@ extern "C" int main(void)
 
 
     /* ========================================================
-     * CREATE CONTROL TASK
+     * CONTROL TASK
      * ======================================================== */
 
     hw_uart_puts(
@@ -686,7 +812,7 @@ extern "C" int main(void)
 
 
     /* ========================================================
-     * CREATE TELEMETRY TASK
+     * TELEMETRY TASK
      * ======================================================== */
 
     hw_uart_puts(
@@ -697,7 +823,7 @@ extern "C" int main(void)
         xTaskCreate(
             telemetry_task,
             "TELEMETRY",
-            512,
+            768,
             nullptr,
             1,
             nullptr
@@ -721,7 +847,7 @@ extern "C" int main(void)
 
 
     /* ========================================================
-     * CREATE FAULT TEST TASK
+     * FAULT TEST TASK
      *
      * QEMU ONLY
      * ======================================================== */
