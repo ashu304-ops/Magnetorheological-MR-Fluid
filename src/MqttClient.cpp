@@ -1,3 +1,4 @@
+
 #include "MqttClient.hpp"
 
 extern "C" void hw_uart_puts(const char* str);
@@ -5,25 +6,32 @@ extern "C" void hw_uart_puts(const char* str);
 
 /* ============================================================
  * CONNECT
+ *
+ * Option A:
+ * QEMU does not directly implement TCP/MQTT.
+ *
+ * The Linux host reads the telemetry line from QEMU stdout
+ * and forwards it to Mosquitto.
  * ============================================================ */
 
 bool MqttClient::connect() noexcept
 {
-    /*
-     * Temporary QEMU implementation.
-     *
-     * Later this will perform the actual
-     * MQTT/TCP connection.
-     */
-
     hw_uart_puts(
-        "[MQTT] Connecting to broker...\r\n"
+        "[MQTT] Connecting to host MQTT bridge...\r\n"
     );
+
+    /*
+     * The host bridge is responsible for the real
+     * MQTT connection to Mosquitto :1883.
+     *
+     * From the firmware point of view, the transport
+     * is considered ready once the bridge is available.
+     */
 
     connected_ = true;
 
     hw_uart_puts(
-        "[MQTT] Broker connected\r\n"
+        "[MQTT] Host MQTT bridge ready\r\n"
     );
 
     return true;
@@ -32,6 +40,13 @@ bool MqttClient::connect() noexcept
 
 /* ============================================================
  * PUBLISH
+ *
+ * Format:
+ *
+ * [MQTT-PUBLISH] topic=... payload=...
+ *
+ * The Linux MQTT bridge will detect this line and publish
+ * the payload to Mosquitto.
  * ============================================================ */
 
 bool MqttClient::publish(
@@ -49,7 +64,7 @@ bool MqttClient::publish(
     }
 
     hw_uart_puts(
-        "[MQTT] topic="
+        "[MQTT-PUBLISH] topic="
     );
 
     hw_uart_puts(topic);
